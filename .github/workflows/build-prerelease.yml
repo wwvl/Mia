@@ -1,0 +1,252 @@
+name: Prerelease Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g., v1.0.0-alpha.1)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CNB_REPO_SLUG: wwvo/cnb-rs/cnb-rs
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive_ext: tar.gz
+            use_cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+            use_cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            archive_ext: tar.gz
+            use_cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            msvc_dev_cmd_arch: amd64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive_ext: zip
+            msvc_dev_cmd_arch: amd64_arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+
+    steps:
+      - name: Clone from CNB
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: prerelease-${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Setup MSVC developer command prompt
+        if: matrix.msvc_dev_cmd_arch
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_dev_cmd_arch }}
+
+      - name: Build binaries (Windows MSVC)
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        shell: pwsh
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Build binaries (cross)
+        if: matrix.use_cross
+        shell: bash
+        run: cross build --release --locked --target "${{ matrix.target }}"
+
+      - name: Build binaries (native)
+        if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross }}
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ inputs.version }}"
+          asset_base="cnb-rs-${release_tag}-${{ matrix.target }}"
+          asset_dir="${asset_base}"
+
+          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+            binary_name="cnb-rs.exe"
+          else
+            binary_name="cnb-rs"
+          fi
+
+          mkdir -p "${asset_dir}"
+          cp "target/${{ matrix.target }}/release/${binary_name}" "${asset_dir}/"
+
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            7z a -tzip -mx=9 "${asset_base}.zip" "${asset_dir}"
+            archive_file="${asset_base}.zip"
+          else
+            archive_file="${asset_base}.tar.gz"
+            tar cf - "${asset_dir}" | gzip -9 > "${archive_file}"
+          fi
+
+          printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.archive_file }}
+          path: ${{ steps.package.outputs.archive_file }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish to CNB Release
+    needs: build
+    if: ${{ always() && !cancelled() && needs.build.result != 'failure' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone from CNB (for installer scripts)
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cnb-rs-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Ensure at least one artifact is available
+        run: |
+          set -euo pipefail
+
+          if ! find release-artifacts -maxdepth 1 -type f | grep -q .; then
+            echo "No successful build artifacts were produced; skip release publishing." >&2
+            exit 1
+          fi
+
+      - name: Stage installer scripts
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ inputs.version }}"
+          cp scripts/install.sh "release-artifacts/cnb-rs-${release_tag}-install.sh"
+          cp scripts/install.ps1 "release-artifacts/cnb-rs-${release_tag}-install.ps1"
+          chmod 755 "release-artifacts/cnb-rs-${release_tag}-install.sh"
+
+      - name: Generate SHA-256 checksums
+        run: |
+          set -euo pipefail
+
+          cd release-artifacts
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'cnb-rs-*-install.sh' -o -name 'cnb-rs-*-install.ps1' \) -printf '%P\n' | sort | xargs sha256sum > sha256sum.txt
+
+      # ── Install cnb-rs from build artifacts ─────────────────────────
+      - name: Install cnb-rs from build artifacts
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ inputs.version }}"
+          archive="release-artifacts/cnb-rs-${release_tag}-x86_64-unknown-linux-gnu.tar.gz"
+
+          if [[ ! -f "${archive}" ]]; then
+            echo "Linux x86_64-gnu archive not found, cannot upload to CNB" >&2
+            exit 1
+          fi
+
+          tar -xzf "${archive}"
+          chmod +x "cnb-rs-${release_tag}-x86_64-unknown-linux-gnu/cnb-rs"
+          sudo cp "cnb-rs-${release_tag}-x86_64-unknown-linux-gnu/cnb-rs" /usr/local/bin/cnb-rs
+          cnb-rs --version
+
+      # ── CNB Release: create + upload ────────────────────────────────
+      - name: Ensure CNB release exists
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -eu
+
+          release_tag="${{ inputs.version }}"
+          repo="${CNB_REPO_SLUG}"
+
+          if cnb-rs --repo "${repo}" release view "${release_tag}" >/dev/null 2>&1; then
+            echo "release ${release_tag} 已存在，跳过 create"
+          else
+            echo "release ${release_tag} 不存在，尝试创建"
+            cnb-rs --repo "${repo}" release create \
+              -t "${release_tag}" \
+              -n "${release_tag}" \
+              -b "**预览版构建** — 由 GitHub Actions 编译，覆盖 Linux / Windows / macOS 多平台。" \
+              -p \
+              || echo "(create 报错，继续二次 view 验证)"
+
+            if cnb-rs --repo "${repo}" release view "${release_tag}" >/dev/null 2>&1; then
+              echo "二次验证：release ${release_tag} 已成功创建"
+            else
+              echo "ERROR: release ${release_tag} 仍不存在" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Upload artifacts to CNB Release
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ inputs.version }}"
+          repo="${CNB_REPO_SLUG}"
+
+          for f in release-artifacts/*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            echo "Uploading ${name}..."
+            cnb-rs --repo "${repo}" release asset-upload -t "${release_tag}" -f "$f" || {
+              echo "WARNING: failed to upload ${name}, continuing..." >&2
+            }
+          done
+
+          echo "CNB Release upload complete"
