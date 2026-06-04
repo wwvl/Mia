@@ -102,11 +102,13 @@ jobs:
         if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross }}
         shell: bash
         run: |
+          CARGO_CMD="cargo"
           BUILD_STD_FLAG=""
           if [[ "${{ matrix.use_build_std }}" == "true" ]]; then
+            CARGO_CMD="cargo +nightly"
             BUILD_STD_FLAG="-Z build-std=std,panic_abort"
           fi
-          cargo build --release --locked --target "${{ matrix.target }}" $BUILD_STD_FLAG
+          $CARGO_CMD build --release --locked --target "${{ matrix.target }}" $BUILD_STD_FLAG
 
       - name: Compress binary with UPX (Linux only)
         if: contains(matrix.target, 'linux')
