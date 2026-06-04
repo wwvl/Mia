@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version tag (e.g., v1.0.0-alpha.1)"
+        description: 'Release version tag (e.g., v1.0.0-alpha.1)'
         required: true
         type: string
 
@@ -25,6 +25,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
+            use_build_std: true
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive_ext: tar.gz
@@ -63,9 +64,11 @@ jobs:
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.use_build_std && 'nightly' || 'stable' }}
           targets: ${{ matrix.target }}
+          components: ${{ matrix.use_build_std && 'rust-src' || '' }}
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -97,7 +100,27 @@ jobs:
       - name: Build binaries (native)
         if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross }}
         shell: bash
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: |
+          BUILD_STD_FLAG=""
+          if [[ "${{ matrix.use_build_std }}" == "true" ]]; then
+            BUILD_STD_FLAG="-Z build-std=std,panic_abort"
+          fi
+          cargo build --release --locked --target "${{ matrix.target }}" $BUILD_STD_FLAG
+
+      - name: Compress binary with UPX (Linux only)
+        if: contains(matrix.target, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/cnb-rs"
+          if command -v upx &>/dev/null; then
+            upx --best "${binary}" || echo "UPX compression failed, continuing with uncompressed binary"
+          else
+            # Install UPX
+            UPX_VERSION="5.1.1"
+            curl -sL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" | tar -xJ --strip-components=1 -C /usr/local/bin "upx-${UPX_VERSION}-amd64_linux/upx"
+            upx --best "${binary}" || echo "UPX compression failed, continuing with uncompressed binary"
+          fi
 
       - name: Package artifact
         id: package
@@ -184,23 +207,8 @@ jobs:
           cd release-artifacts
           find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'cnb-rs-*-install.sh' -o -name 'cnb-rs-*-install.ps1' \) -printf '%P\n' | sort | xargs sha256sum > sha256sum.txt
 
-      # ── Install cnb-rs from build artifacts ─────────────────────────
-      - name: Install cnb-rs from build artifacts
-        run: |
-          set -euo pipefail
-
-          release_tag="${{ inputs.version }}"
-          archive="release-artifacts/cnb-rs-${release_tag}-x86_64-unknown-linux-gnu.tar.gz"
-
-          if [[ ! -f "${archive}" ]]; then
-            echo "Linux x86_64-gnu archive not found, cannot upload to CNB" >&2
-            exit 1
-          fi
-
-          tar -xzf "${archive}"
-          chmod +x "cnb-rs-${release_tag}-x86_64-unknown-linux-gnu/cnb-rs"
-          sudo cp "cnb-rs-${release_tag}-x86_64-unknown-linux-gnu/cnb-rs" /usr/local/bin/cnb-rs
-          cnb-rs --version
+      - name: Setup cnb-rs
+        uses: wwvl/setup-cnb-rs@main
 
       # ── CNB Release: create + upload ────────────────────────────────
       - name: Ensure CNB release exists
