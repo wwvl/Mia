@@ -386,3 +386,47 @@ jobs:
 
           echo "Publishing @wwvo/cnb-rs@${version} (tag: ${npm_tag})..."
           npm publish --access public --tag "${npm_tag}"
+
+  update-setup-action:
+    name: Update setup-cnb-rs default version
+    needs: [publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Clone setup-cnb-rs from CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/wwvo/cnb-rs/setup-cnb-rs.git" setup-cnb-rs
+          cd setup-cnb-rs
+          git config user.name "illegal_name_cnb.by9cbmyhqda"
+          git config user.email "NSC0TbC7oYPediWNVyWWaC+illegal_name_cnb.by9cbmyhqda@noreply.cnb.cool"
+
+      - name: Update default version
+        run: |
+          set -euo pipefail
+          new_version="${{ inputs.version }}"
+          cd setup-cnb-rs
+
+          # Read current default version from action.yml
+          old_version="$(grep -oP 'default: "v\K[^"]+' action.yml)"
+          old_version="v${old_version}"
+
+          if [[ "${old_version}" == "${new_version}" ]]; then
+            echo "setup-cnb-rs already at ${new_version}, skipping"
+            exit 0
+          fi
+
+          echo "Updating setup-cnb-rs: ${old_version} → ${new_version}"
+
+          # Replace all occurrences of old version with new version
+          sed -i "s|${old_version}|${new_version}|g" action.yml README.md README.en.md
+
+          git add -A
+          git diff --cached --quiet && { echo "No changes"; exit 0; }
+          git commit -m "🔧 chore: bump default version to ${new_version}"
+          git push
