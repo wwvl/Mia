@@ -255,13 +255,134 @@ jobs:
           release_tag="${{ inputs.version }}"
           repo="${CNB_REPO_SLUG}"
 
-          for f in release-artifacts/*; do
-            [ -f "$f" ] || continue
-            name="$(basename "$f")"
-            echo "Uploading ${name}..."
-            cnb-rs --repo "${repo}" release asset-upload -t "${release_tag}" -f "$f" || {
-              echo "WARNING: failed to upload ${name}, continuing..." >&2
-            }
-          done
+          cnb-rs --repo "${repo}" release upload -t "${release_tag}" --clobber release-artifacts/
 
           echo "CNB Release upload complete"
+
+  publish-npm:
+    name: Publish npm packages
+    needs: [publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone from CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cnb-rs-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          # Strip leading 'v' from tag
+          version="${{ inputs.version }}"
+          version="${version#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+          # Prerelease versions (containing '-') get published under 'next' tag
+          if [[ "${version}" == *-* ]]; then
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish platform-specific packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          publish_platform() {
+            local node_os="$1" node_arch="$2" rust_target="$3" binary_name="$4"
+            local pkg_dir="npm-staging/${node_os}-${node_arch}"
+
+            # Locate the release archive for this target
+            local archive_file
+            archive_file=$(find release-artifacts -maxdepth 1 -type f -name "cnb-rs-*-${rust_target}.*" | head -n 1)
+            if [[ -z "${archive_file}" ]]; then
+              echo "WARN: no artifact for ${rust_target}, skipping @wwvo/cnb-rs-${node_os}-${node_arch}"
+              return 0
+            fi
+
+            mkdir -p "${pkg_dir}/bin"
+
+            # Extract binary from archive
+            if [[ "${archive_file}" == *.tar.gz ]]; then
+              tar xzf "${archive_file}" --strip-components=1 -C "${pkg_dir}/bin" --wildcards "*/${binary_name}"
+            elif [[ "${archive_file}" == *.zip ]]; then
+              local tmpdir
+              tmpdir=$(mktemp -d)
+              unzip -q "${archive_file}" -d "${tmpdir}"
+              cp "${tmpdir}"/*/"${binary_name}" "${pkg_dir}/bin/"
+              rm -rf "${tmpdir}"
+            fi
+
+            chmod +x "${pkg_dir}/bin/${binary_name}"
+
+            # Generate package.json from template (only substitute known variables)
+            export node_os node_arch version
+            envsubst '$node_os $node_arch $version' < npm/package.json.tmpl > "${pkg_dir}/package.json"
+            cp npm/README.md "${pkg_dir}/"
+
+            local pkg_full_name="@wwvo/cnb-rs-${node_os}-${node_arch}"
+            local npm_tag="${{ steps.version.outputs.npm_tag }}"
+
+            # Skip if this exact version is already published
+            if npm view "${pkg_full_name}@${version}" version &>/dev/null; then
+              echo "SKIP: ${pkg_full_name}@${version} already published"
+              return 0
+            fi
+
+            echo "Publishing ${pkg_full_name}@${version} (tag: ${npm_tag})..."
+            cd "${pkg_dir}"
+            npm publish --access public --tag "${npm_tag}"
+            cd - > /dev/null
+          }
+
+          publish_platform linux   x64   x86_64-unknown-linux-musl  cnb-rs
+          publish_platform linux   arm64 aarch64-unknown-linux-musl cnb-rs
+          publish_platform darwin  x64   x86_64-apple-darwin        cnb-rs
+          publish_platform darwin  arm64 aarch64-apple-darwin       cnb-rs
+          publish_platform win32   x64   x86_64-pc-windows-msvc    cnb-rs.exe
+          publish_platform win32   arm64 aarch64-pc-windows-msvc   cnb-rs.exe
+
+      - name: Publish base package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          cd npm/cnb-rs
+
+          # Replace placeholder version with actual version
+          sed -i "s/0.0.0-placeholder/${version}/g" package.json
+
+          npm_tag="${{ steps.version.outputs.npm_tag }}"
+
+          # Skip if this exact version is already published
+          if npm view "@wwvo/cnb-rs@${version}" version &>/dev/null; then
+            echo "SKIP: @wwvo/cnb-rs@${version} already published"
+            exit 0
+          fi
+
+          echo "Publishing @wwvo/cnb-rs@${version} (tag: ${npm_tag})..."
+          npm publish --access public --tag "${npm_tag}"
