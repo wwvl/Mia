@@ -40,6 +40,10 @@ jobs:
             archive_ext: tar.gz
             use_cross: true
           - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            archive_ext: zip
+            setup_mingw: true
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
             msvc_dev_cmd_arch: amd64
@@ -47,6 +51,10 @@ jobs:
             target: aarch64-pc-windows-msvc
             archive_ext: zip
             msvc_dev_cmd_arch: amd64_arm64
+          - os: ubuntu-latest
+            target: aarch64-pc-windows-gnullvm
+            archive_ext: zip
+            setup_cross_toolchain: true
           - os: macos-latest
             target: x86_64-apple-darwin
             archive_ext: tar.gz
@@ -82,6 +90,25 @@ jobs:
         with:
           tool: cross
 
+      - name: Setup MinGW
+        if: matrix.setup_mingw
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-toolchain
+
+      - name: Add MinGW to PATH
+        if: matrix.setup_mingw
+        shell: pwsh
+        run: echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+
+      - name: Setup Windows ARM64 gnullvm toolchain
+        if: matrix.setup_cross_toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
       - name: Setup MSVC developer command prompt
         if: matrix.msvc_dev_cmd_arch
         uses: ilammy/msvc-dev-cmd@v1
@@ -89,7 +116,7 @@ jobs:
           arch: ${{ matrix.msvc_dev_cmd_arch }}
 
       - name: Install system dependencies (Linux native)
-        if: runner.os == 'Linux' && !matrix.use_cross
+        if: runner.os == 'Linux' && !matrix.use_cross && !matrix.setup_cross_toolchain
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Build binaries (Windows MSVC)
@@ -103,7 +130,7 @@ jobs:
         run: cross build --release --locked --target "${{ matrix.target }}"
 
       - name: Build binaries (native)
-        if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross }}
+        if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross && !matrix.setup_cross_toolchain }}
         shell: bash
         run: |
           CARGO_CMD="cargo"
@@ -113,6 +140,11 @@ jobs:
             BUILD_STD_FLAG="-Z build-std=std,panic_abort"
           fi
           $CARGO_CMD build --release --locked --target "${{ matrix.target }}" $BUILD_STD_FLAG
+
+      - name: Build binaries (cross-toolchain)
+        if: matrix.setup_cross_toolchain
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
 
       - name: Compress binary with UPX (Linux only)
         if: contains(matrix.target, 'linux')
@@ -264,6 +296,9 @@ jobs:
     needs: [publish]
     if: ${{ needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Clone from CNB
@@ -279,6 +314,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
 
       - name: Download build artifacts
         uses: actions/download-artifact@v7
@@ -304,8 +342,6 @@ jobs:
           fi
 
       - name: Publish platform-specific packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -365,11 +401,12 @@ jobs:
           publish_platform win32   arm64 aarch64-pc-windows-msvc   cnb-rs.exe
 
       - name: Publish base package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
+
+          # Copy README into base package directory (npm includes root README automatically)
+          cp npm/README.md npm/cnb-rs/README.md
 
           cd npm/cnb-rs
 
@@ -430,3 +467,54 @@ jobs:
           git diff --cached --quiet && { echo "No changes"; exit 0; }
           git commit -m "🔧 chore: bump default version to ${new_version}"
           git push
+
+  update-package-repos:
+    name: Update Homebrew and Scoop package repos
+    needs: [publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Clone from CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cnb-rs-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Locate checksums file
+        id: checksums
+        run: |
+          set -euo pipefail
+          checksums_file="$(find release-artifacts -maxdepth 1 -name 'sha256sum.txt' -type f | head -n 1)"
+          if [[ -z "${checksums_file}" ]]; then
+            echo "::error::sha256sum.txt not found in release-artifacts"
+            exit 1
+          fi
+          echo "file=${checksums_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Update package repositories
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_WEB_ENDPOINT: https://cnb.cool
+        run: |
+          set -euo pipefail
+          python3 scripts/release/update_package_repos.py \
+            --release-tag "${{ inputs.version }}" \
+            --asset-source cnb \
+            --checksums-file "${{ steps.checksums.outputs.file }}" \
+            --push
