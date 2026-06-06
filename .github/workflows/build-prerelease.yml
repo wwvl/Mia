@@ -18,6 +18,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +28,8 @@ jobs:
             archive_ext: tar.gz
             use_build_std: true
             toolchain: nightly
+            package_linux_deb: true
+            package_linux_rpm: true
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive_ext: tar.gz
@@ -35,6 +38,9 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
             use_cross: true
+            package_linux_deb: true
+            package_linux_rpm: true
+            linux_deb_arch: arm64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             archive_ext: tar.gz
@@ -43,18 +49,25 @@ jobs:
             target: x86_64-pc-windows-gnu
             archive_ext: zip
             setup_mingw: true
+            package_windows_msi: true
+            windows_msi_arch: x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
             msvc_dev_cmd_arch: amd64
+            package_windows_msi: true
+            windows_msi_arch: x64
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             archive_ext: zip
             msvc_dev_cmd_arch: amd64_arm64
+            package_windows_msi: true
+            windows_msi_arch: arm64
           - os: ubuntu-latest
             target: aarch64-pc-windows-gnullvm
             archive_ext: zip
             setup_cross_toolchain: true
+            experimental: true
           - os: macos-latest
             target: x86_64-apple-darwin
             archive_ext: tar.gz
@@ -83,6 +96,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: prerelease-${{ matrix.target }}
+
+      - name: Resolve Cargo host target
+        id: host_target
+        shell: bash
+        run: |
+          host_target="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "target=${host_target}" >> "$GITHUB_OUTPUT"
 
       - name: Install cross
         if: matrix.use_cross
@@ -115,6 +135,33 @@ jobs:
         with:
           arch: ${{ matrix.msvc_dev_cmd_arch }}
 
+      - name: Install Linux native packaging dependencies
+        if: matrix.package_linux_deb || matrix.package_linux_rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev rpm
+          if [[ -n "${{ matrix.linux_deb_arch }}" ]]; then
+            sudo apt-get install -y "crossbuild-essential-${{ matrix.linux_deb_arch }}"
+          fi
+
+      - name: Install cargo-deb
+        if: matrix.package_linux_deb
+        shell: bash
+        run: cargo install cargo-deb --locked --target "${{ steps.host_target.outputs.target }}"
+
+      - name: Install cargo-generate-rpm
+        if: matrix.package_linux_rpm
+        shell: bash
+        run: cargo install cargo-generate-rpm --locked --target "${{ steps.host_target.outputs.target }}"
+
+      - name: Setup .NET SDK
+        if: matrix.package_windows_msi
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Install system dependencies (Linux native)
         if: runner.os == 'Linux' && !matrix.use_cross && !matrix.setup_cross_toolchain
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
@@ -146,6 +193,26 @@ jobs:
         shell: bash
         run: cargo build --release --locked --target "${{ matrix.target }}"
 
+      - name: Build Windows MSI package
+        if: matrix.package_windows_msi
+        shell: pwsh
+        run: |
+          .\packaging\windows\scripts\build-msi.ps1 `
+            -Target ${{ matrix.target }} `
+            -Architecture ${{ matrix.windows_msi_arch }} `
+            -OutputDir target\windows-msi
+
+      - name: Build Linux packaging helper binary
+        if: matrix.package_linux_deb || matrix.package_linux_rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_target="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ "${{ matrix.target }}" == "${host_target}" ]]; then
+            exit 0
+          fi
+          cargo build --release --locked --bin cnb-rs --target "${host_target}" --target-dir target/packaging-host
+
       - name: Compress binary with UPX (Linux only)
         if: contains(matrix.target, 'linux')
         shell: bash
@@ -170,6 +237,10 @@ jobs:
           release_tag="${{ inputs.version }}"
           asset_base="cnb-rs-${release_tag}-${{ matrix.target }}"
           asset_dir="${asset_base}"
+          archive_file=""
+          msi_file=""
+          deb_file=""
+          rpm_file=""
 
           if [[ "${{ matrix.target }}" == *-windows-* ]]; then
             binary_name="cnb-rs.exe"
@@ -188,9 +259,56 @@ jobs:
             tar cf - "${asset_dir}" | gzip -9 > "${archive_file}"
           fi
 
-          printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.package_windows_msi }}" == "true" ]]; then
+            generated_msi_file="$(find target/windows-msi -maxdepth 1 -type f -name "*-${{ matrix.target }}.msi" | sort | head -n 1)"
+            : "${generated_msi_file:?failed to locate generated MSI file}"
+            cp "${generated_msi_file}" .
+            msi_file="$(basename "${generated_msi_file}")"
+          fi
 
-      - name: Upload build artifact
+          if [[ "${{ matrix.package_linux_deb }}" == "true" || "${{ matrix.package_linux_rpm }}" == "true" ]]; then
+            host_target="$(rustc -vV | sed -n 's/^host: //p')"
+            completion_binary_path="target/${{ matrix.target }}/release/cnb-rs"
+            if [[ "${{ matrix.target }}" != "${host_target}" ]]; then
+              completion_binary_path="target/packaging-host/${host_target}/release/cnb-rs"
+            fi
+            bash packaging/linux/scripts/generate-completions.sh --binary-path "${completion_binary_path}"
+          fi
+
+          if [[ "${{ matrix.package_linux_deb }}" == "true" ]]; then
+            cargo deb --no-build --no-strip --target "${{ matrix.target }}"
+            generated_deb_file=""
+            for candidate_dir in "target/${{ matrix.target }}/debian" "target/debian"; do
+              if [[ -d "${candidate_dir}" ]]; then
+                generated_deb_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.deb' | head -n 1)"
+              fi
+              if [[ -n "${generated_deb_file}" ]]; then break; fi
+            done
+            : "${generated_deb_file:?failed to locate generated deb file}"
+            cp "${generated_deb_file}" .
+            deb_file="$(basename "${generated_deb_file}")"
+          fi
+
+          if [[ "${{ matrix.package_linux_rpm }}" == "true" ]]; then
+            cargo generate-rpm --target "${{ matrix.target }}"
+            generated_rpm_file=""
+            for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
+              if [[ -d "${candidate_dir}" ]]; then
+                generated_rpm_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.rpm' | head -n 1)"
+              fi
+              if [[ -n "${generated_rpm_file}" ]]; then break; fi
+            done
+            : "${generated_rpm_file:?failed to locate generated rpm file}"
+            cp "${generated_rpm_file}" .
+            rpm_file="$(basename "${generated_rpm_file}")"
+          fi
+
+          printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
+          printf 'msi_file=%s\n' "${msi_file}" >> "$GITHUB_OUTPUT"
+          printf 'deb_file=%s\n' "${deb_file}" >> "$GITHUB_OUTPUT"
+          printf 'rpm_file=%s\n' "${rpm_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build archive artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.package.outputs.archive_file }}
@@ -199,20 +317,282 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  publish:
-    name: Publish to CNB Release
+      - name: Upload Windows MSIX input artifact
+        if: ${{ matrix.target == 'x86_64-pc-windows-msvc' || matrix.target == 'aarch64-pc-windows-msvc' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-msix-input-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cnb-rs.exe
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Windows MSI artifact
+        if: ${{ steps.package.outputs.msi_file != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.msi_file }}
+          path: ${{ steps.package.outputs.msi_file }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Linux DEB artifact
+        if: ${{ steps.package.outputs.deb_file != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.deb_file }}
+          path: ${{ steps.package.outputs.deb_file }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Linux RPM artifact
+        if: ${{ steps.package.outputs.rpm_file != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.rpm_file }}
+          path: ${{ steps.package.outputs.rpm_file }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  build-msix:
+    name: Build Windows MSIX/MSIXBUNDLE
     needs: build
-    if: ${{ always() && !cancelled() && needs.build.result != 'failure' }}
-    runs-on: ubuntu-latest
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: windows-latest
+    outputs:
+      msix_enabled: ${{ steps.signing_mode.outputs.enabled }}
+      release_version: ${{ steps.metadata.outputs.release_version }}
+      msix_version: ${{ steps.metadata.outputs.msix_version }}
+    env:
+      WINDOWS_MSIX_PFX_BASE64: ${{ secrets.WINDOWS_MSIX_PFX_BASE64 }}
+      WINDOWS_MSIX_PFX_PASSWORD: ${{ secrets.WINDOWS_MSIX_PFX_PASSWORD }}
+      WINDOWS_MSIX_IDENTITY_NAME: ${{ vars.WINDOWS_MSIX_IDENTITY_NAME }}
+      WINDOWS_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.WINDOWS_MSIX_PUBLISHER_DISPLAY_NAME }}
+      WINDOWS_MSIX_DISPLAY_NAME: ${{ vars.WINDOWS_MSIX_DISPLAY_NAME }}
+      WINDOWS_MSIX_DESCRIPTION: ${{ vars.WINDOWS_MSIX_DESCRIPTION }}
+      WINDOWS_MSIX_EXECUTION_ALIAS: ${{ vars.WINDOWS_MSIX_EXECUTION_ALIAS }}
 
     steps:
-      - name: Clone from CNB (for installer scripts)
+      - name: Clone from CNB
+        shell: bash
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
           git clone --depth 1 --branch "${{ inputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Resolve MSIX signing mode
+        id: signing_mode
+        shell: pwsh
+        run: |
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_PFX_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_PFX_PASSWORD)
+
+          if ($hasPfx -and $hasPassword) {
+            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "MSIX signing secrets detected; Windows MSIX/MSIXBUNDLE build is enabled."
+            exit 0
+          }
+
+          if (-not $hasPfx -and -not $hasPassword) {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Warning "MSIX signing secrets not configured; skipping Windows MSIX/MSIXBUNDLE build."
+            exit 0
+          }
+
+          throw "Incomplete MSIX signing configuration"
+
+      - name: Setup Rust toolchain
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-msix-prerelease
+
+      - name: Setup .NET SDK
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve MSIX release metadata
+        id: metadata
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}".TrimStart("v")
+          $semverMatch = [regex]::Match($version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)')
+          if (-not $semverMatch.Success) {
+            throw "Unsupported version for MSIX packaging: $version"
+          }
+          $msixVersion = "{0}.{1}.{2}.0" -f $semverMatch.Groups["major"].Value, $semverMatch.Groups["minor"].Value, $semverMatch.Groups["patch"].Value
+          $identityName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_IDENTITY_NAME)) { "wwvo.cnb-rs" } else { $env:WINDOWS_MSIX_IDENTITY_NAME }
+          $publisherDisplayName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_PUBLISHER_DISPLAY_NAME)) { "wwvo" } else { $env:WINDOWS_MSIX_PUBLISHER_DISPLAY_NAME }
+          $displayName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_DISPLAY_NAME)) { "cnb-rs" } else { $env:WINDOWS_MSIX_DISPLAY_NAME }
+          $description = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_DESCRIPTION)) { "Unofficial CNB command-line tool built with Rust" } else { $env:WINDOWS_MSIX_DESCRIPTION }
+          $executionAlias = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MSIX_EXECUTION_ALIAS)) { "cnb-rs.exe" } else { $env:WINDOWS_MSIX_EXECUTION_ALIAS }
+          "release_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "msix_version=$msixVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "identity_name=$identityName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publisher_display_name=$publisherDisplayName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "display_name=$displayName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "description=$description" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "execution_alias=$executionAlias" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Download x64 MSIX input artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-msix-input-x86_64-pc-windows-msvc
+          path: target/windows-msix/input/x64
+
+      - name: Download arm64 MSIX input artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-msix-input-aarch64-pc-windows-msvc
+          path: target/windows-msix/input/arm64
+
+      - name: Install msixbundle-cli
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: cargo install msixbundle-cli --locked --version 1.1.4 --root target/tools/msixbundle-cli
+
+      - name: Materialize signing certificate
+        id: certificate
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: |
+          $certDir = Join-Path $PWD "target/windows-msix/cert"
+          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+          $pfxPath = Join-Path $certDir "release-signing.pfx"
+          $certificateAssetName = "cnb-rs-v${{ steps.metadata.outputs.release_version }}-windows-msvc-signing-cert.cer"
+          $certificatePath = Join-Path $certDir $certificateAssetName
+          [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WINDOWS_MSIX_PFX_BASE64))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_MSIX_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Get-PfxCertificate -FilePath $pfxPath -Password $password
+          [System.IO.File]::WriteAllBytes($certificatePath, $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+          $publisher = $certificate.Subject
+          "pfx_path=$pfxPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "certificate_path=$certificatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publisher=$publisher" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Stage MSIX package contents
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: |
+          .\packaging\windows\scripts\stage-msix-content.ps1 `
+            -X64BinaryPath target\windows-msix\input\x64\cnb-rs.exe `
+            -Arm64BinaryPath target\windows-msix\input\arm64\cnb-rs.exe `
+            -OutputDir target\windows-msix\appxcontent `
+            -IdentityName "${{ steps.metadata.outputs.identity_name }}" `
+            -Publisher "${{ steps.certificate.outputs.publisher }}" `
+            -PublisherDisplayName "${{ steps.metadata.outputs.publisher_display_name }}" `
+            -DisplayName "${{ steps.metadata.outputs.display_name }}" `
+            -Description "${{ steps.metadata.outputs.description }}" `
+            -ExecutionAlias "${{ steps.metadata.outputs.execution_alias }}"
+
+      - name: Build Windows MSIX/MSIXBUNDLE artifacts
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: |
+          .\packaging\windows\scripts\build-msixbundle.ps1 `
+            -OutputDir target\windows-msix\output `
+            -PfxPath "${{ steps.certificate.outputs.pfx_path }}" `
+            -CertificatePath "${{ steps.certificate.outputs.certificate_path }}" `
+            -Version "${{ steps.metadata.outputs.release_version }}"
+
+      - name: Upload MSIX bundle artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: cnb-rs-v${{ steps.metadata.outputs.release_version }}-windows-msvc.msixbundle
+          path: target/windows-msix/output/cnb-rs-v${{ steps.metadata.outputs.release_version }}-windows-msvc.msixbundle
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Windows MSIX signing certificate artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: cnb-rs-v${{ steps.metadata.outputs.release_version }}-windows-msvc-signing-cert.cer
+          path: ${{ steps.certificate.outputs.certificate_path }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  smoke-test-msix:
+    name: Smoke test Windows MSIX (${{ matrix.target }})
+    needs: build-msix
+    if: ${{ needs.build-msix.result == 'success' && needs.build-msix.outputs.msix_enabled == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+
+    steps:
+      - name: Clone from CNB
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - name: Download MSIX bundle artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: cnb-rs-v${{ needs.build-msix.outputs.release_version }}-windows-msvc.msixbundle
+          path: target/windows-msix/download/bundle
+
+      - name: Download MSIX signing certificate artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: cnb-rs-v${{ needs.build-msix.outputs.release_version }}-windows-msvc-signing-cert.cer
+          path: target/windows-msix/download/cert
+
+      - name: Smoke test MSIX install and uninstall
+        shell: pwsh
+        run: |
+          $bundlePath = Get-ChildItem target\windows-msix\download\bundle\*.msixbundle | Select-Object -First 1 -ExpandProperty FullName
+          $certificatePath = Get-ChildItem target\windows-msix\download\cert\*.cer | Select-Object -First 1 -ExpandProperty FullName
+          .\packaging\windows\scripts\test-msixbundle.ps1 `
+            -BundlePath $bundlePath `
+            -CertificatePath $certificatePath `
+            -ExpectedVersion "${{ needs.build-msix.outputs.msix_version }}"
+
+  publish:
+    name: Publish to CNB Release
+    needs:
+      - build
+      - build-msix
+      - smoke-test-msix
+    if: ${{ always() && !cancelled() && needs.build.result != 'failure' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone from CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+          git fetch --tags --force
 
       - name: Download build artifacts
         uses: actions/download-artifact@v7
@@ -244,7 +624,7 @@ jobs:
           set -euo pipefail
 
           cd release-artifacts
-          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'cnb-rs-*-install.sh' -o -name 'cnb-rs-*-install.ps1' \) -printf '%P\n' | sort | xargs sha256sum > sha256sum.txt
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.msi' -o -name '*.msix' -o -name '*.msixbundle' -o -name '*.deb' -o -name '*.rpm' -o -name '*.cer' -o -name 'cnb-rs-*-install.sh' -o -name 'cnb-rs-*-install.ps1' \) -printf '%P\n' | sort | xargs sha256sum > sha256sum.txt
 
       - name: Upload checksums artifact
         uses: actions/upload-artifact@v6
@@ -254,6 +634,26 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          git cliff --latest --strip header -o LATEST_CHANGELOG.md
+
+      # ── GitHub Release（注释：等代码同步到 GitHub 后启用）────────────
+      # - name: Create or update GitHub Release
+      #   uses: softprops/action-gh-release@v2
+      #   with:
+      #     tag_name: ${{ inputs.version }}
+      #     files: release-artifacts/*
+      #     body_path: LATEST_CHANGELOG.md
+      #     overwrite_files: true
+      #     prerelease: ${{ contains(inputs.version, '-alpha') || contains(inputs.version, '-beta') }}
 
       - name: Setup cnb-rs
         uses: wwvl/setup-cnb-rs@main
@@ -275,7 +675,7 @@ jobs:
             cnb-rs --repo "${repo}" release create \
               -t "${release_tag}" \
               -n "${release_tag}" \
-              -b "**预览版构建** — 由 GitHub Actions 编译，覆盖 Linux / Windows / macOS 多平台。" \
+              -F LATEST_CHANGELOG.md \
               -p \
               || echo "(create 报错，继续二次 view 验证)"
 
