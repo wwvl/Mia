@@ -290,17 +290,23 @@ jobs:
           fi
 
           if [[ "${{ matrix.package_linux_rpm }}" == "true" ]]; then
-            cargo generate-rpm --target "${{ matrix.target }}"
-            generated_rpm_file=""
-            for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
-              if [[ -d "${candidate_dir}" ]]; then
-                generated_rpm_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.rpm' | head -n 1)"
-              fi
-              if [[ -n "${generated_rpm_file}" ]]; then break; fi
-            done
-            : "${generated_rpm_file:?failed to locate generated rpm file}"
-            cp "${generated_rpm_file}" .
-            rpm_file="$(basename "${generated_rpm_file}")"
+            # RPM version format does not support '-' (e.g., 1.0.0-alpha.11 is invalid)
+            # Skip RPM packaging for prerelease versions
+            if [[ "${release_tag}" == *-* ]]; then
+              echo "SKIP: RPM packaging not supported for prerelease version ${release_tag}"
+            else
+              cargo generate-rpm --target "${{ matrix.target }}"
+              generated_rpm_file=""
+              for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
+                if [[ -d "${candidate_dir}" ]]; then
+                  generated_rpm_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.rpm' | head -n 1)"
+                fi
+                if [[ -n "${generated_rpm_file}" ]]; then break; fi
+              done
+              : "${generated_rpm_file:?failed to locate generated rpm file}"
+              cp "${generated_rpm_file}" .
+              rpm_file="$(basename "${generated_rpm_file}")"
+            fi
           fi
 
           printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
