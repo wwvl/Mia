@@ -615,7 +615,6 @@ jobs:
       - resolve
       - build
       - build-msix
-      - smoke-test-msix
     if: ${{ always() && !cancelled() && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
 
@@ -1133,4 +1132,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "Triggering plugin image build for ${{ needs.resolve.outputs.version }}..."
-          cnb-rs build start --repo wwvo/cnb-rs/cnb-rs -b main -e api_trigger_build-plugin-image
+          cnb-rs build start --repo wwvo/cnb-rs/cnb-rs -b main -e api_trigger_build-plugin-image --title "构建插件镜像 (${{ needs.resolve.outputs.version }})"
