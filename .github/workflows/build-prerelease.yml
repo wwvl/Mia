@@ -1115,3 +1115,22 @@ jobs:
             --asset-source cnb \
             --checksums-file "${{ steps.checksums.outputs.file }}" \
             --push
+
+  trigger-plugin-image:
+    name: Trigger plugin image build
+    needs: [resolve, publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Setup cnb-rs
+        uses: wwvl/setup-cnb-rs@main
+
+      - name: Trigger plugin image build on CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Triggering plugin image build for ${{ needs.resolve.outputs.version }}..."
+          cnb-rs build start --repo wwvo/cnb-rs/cnb-rs -b main -e api_trigger_build-plugin-image
