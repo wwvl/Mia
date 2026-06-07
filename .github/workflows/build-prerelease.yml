@@ -767,7 +767,7 @@ jobs:
 
             # Locate the release archive for this target
             local archive_file
-            archive_file=$(find release-artifacts -maxdepth 1 -type f -name "cnb-rs-*-${rust_target}.*" | head -n 1)
+            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) | head -n 1)
             if [[ -z "${archive_file}" ]]; then
               echo "WARN: no artifact for ${rust_target}, skipping @cnb-rs/cli-${node_os}-${node_arch}"
               return 0
@@ -838,6 +838,153 @@ jobs:
 
           echo "Publishing @cnb-rs/cli@${version} (tag: ${npm_tag})..."
           npm publish --access public --tag "${npm_tag}"
+
+  build-pypi-wheels:
+    name: Build PyPI wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux GNU
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: '2_17'
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: '2_17'
+          # Linux Musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Clone from CNB
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist --compatibility pypi
+          working-directory: pypi
+
+      - name: Test wheel
+        if: ${{ startsWith(matrix.target, 'x86_64') && !contains(matrix.target, 'musl') }}
+        shell: bash
+        run: |
+          pip install pypi/dist/cnb_rs-*.whl --force-reinstall
+          cnb-rs --help
+          python -m cnb_rs --help
+
+      - name: Test wheel (musl)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/io -w /io alpine:latest sh -c "
+            apk add python3 py3-pip;
+            pip install --break-system-packages pypi/dist/cnb_rs-*.whl --force-reinstall;
+            cnb-rs --help;
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pypi-wheel-${{ matrix.target }}
+          path: pypi/dist/*.whl
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  build-pypi-sdist:
+    name: Build PyPI sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone from CNB
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: pypi
+
+      - name: Test sdist
+        run: |
+          pip install pypi/dist/cnb_rs-*.tar.gz --force-reinstall
+          cnb-rs --help
+          python -m cnb_rs --help
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pypi-sdist
+          path: pypi/dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-pypi-wheels, build-pypi-sdist]
+    if: ${{ needs.build-pypi-wheels.result == 'success' && needs.build-pypi-sdist.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: pypi-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download sdist artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pypi-sdist
+          path: dist
+
+      - name: Publish to PyPI
+        run: uv publish -v dist/*
 
   update-setup-action:
     name: Update setup-cnb-rs default version
