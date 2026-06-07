@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version tag (e.g., v1.0.0-beta.1)'
-        required: true
+        description: '留空自动取最新 tag；或手动指定（如 v1.0.0-beta.1）'
+        required: false
+        default: ''
         type: string
 
 env:
@@ -15,8 +16,35 @@ env:
   CNB_REPO_SLUG: wwvo/cnb-rs/cnb-rs
 
 jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Detect release version
+        id: resolve
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            latest=$(git ls-remote --tags --sort=-version:refname \
+              "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" "v*" \
+              | grep -v '\^{}' | head -1 | sed 's|.*/||')
+            if [[ -z "${latest}" ]]; then
+              echo "ERROR: no tags found" >&2
+              exit 1
+            fi
+            echo "version=${latest}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved version: $(cat "$GITHUB_OUTPUT" | grep version | cut -d= -f2)"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: resolve
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental || false }}
     strategy:
@@ -82,7 +110,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Setup Rust toolchain
@@ -234,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_tag="${{ inputs.version }}"
+          release_tag="${{ needs.resolve.outputs.version }}"
           asset_base="cnb-rs-${release_tag}-${{ matrix.target }}"
           asset_dir="${asset_base}"
           archive_file=""
@@ -365,7 +393,7 @@ jobs:
 
   build-msix:
     name: Build Windows MSIX/MSIXBUNDLE
-    needs: build
+    needs: [resolve, build]
     if: ${{ needs.build.result == 'success' }}
     runs-on: windows-latest
     outputs:
@@ -388,7 +416,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Resolve MSIX signing mode
@@ -433,7 +461,7 @@ jobs:
         if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
         shell: pwsh
         run: |
-          $version = "${{ inputs.version }}".TrimStart("v")
+          $version = "${{ needs.resolve.outputs.version }}".TrimStart("v")
           $semverMatch = [regex]::Match($version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)')
           if (-not $semverMatch.Success) {
             throw "Unsupported version for MSIX packaging: $version"
@@ -537,7 +565,7 @@ jobs:
 
   smoke-test-msix:
     name: Smoke test Windows MSIX (${{ matrix.target }})
-    needs: build-msix
+    needs: [resolve, build-msix]
     if: ${{ needs.build-msix.result == 'success' && needs.build-msix.outputs.msix_enabled == 'true' }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -556,7 +584,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Download MSIX bundle artifact
@@ -584,6 +612,7 @@ jobs:
   publish:
     name: Publish to CNB Release
     needs:
+      - resolve
       - build
       - build-msix
       - smoke-test-msix
@@ -596,7 +625,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --branch "${{ inputs.version }}" \
+          git clone --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
           git fetch --tags --force
 
@@ -620,7 +649,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_tag="${{ inputs.version }}"
+          release_tag="${{ needs.resolve.outputs.version }}"
           cp scripts/install.sh "release-artifacts/cnb-rs-${release_tag}-install.sh"
           cp scripts/install.ps1 "release-artifacts/cnb-rs-${release_tag}-install.ps1"
           chmod 755 "release-artifacts/cnb-rs-${release_tag}-install.sh"
@@ -655,11 +684,11 @@ jobs:
       # - name: Create or update GitHub Release
       #   uses: softprops/action-gh-release@v2
       #   with:
-      #     tag_name: ${{ inputs.version }}
+      #     tag_name: ${{ needs.resolve.outputs.version }}
       #     files: release-artifacts/*
       #     body_path: LATEST_CHANGELOG.md
       #     overwrite_files: true
-      #     prerelease: ${{ contains(inputs.version, '-alpha') || contains(inputs.version, '-beta') }}
+      #     prerelease: ${{ contains(needs.resolve.outputs.version, '-') }}
 
       - name: Setup cnb-rs
         uses: wwvl/setup-cnb-rs@main
@@ -671,7 +700,7 @@ jobs:
         run: |
           set -eu
 
-          release_tag="${{ inputs.version }}"
+          release_tag="${{ needs.resolve.outputs.version }}"
           repo="${CNB_REPO_SLUG}"
 
           if cnb-rs --repo "${repo}" release view "${release_tag}" >/dev/null 2>&1; then
@@ -699,16 +728,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_tag="${{ inputs.version }}"
+          release_tag="${{ needs.resolve.outputs.version }}"
           repo="${CNB_REPO_SLUG}"
 
-          cnb-rs --repo "${repo}" release upload -t "${release_tag}" --clobber release-artifacts/
+          cnb-rs --repo "${repo}" release upload -t "${release_tag}" --clobber -c 1 release-artifacts/
 
           echo "CNB Release upload complete"
 
   publish-npm:
     name: Publish npm packages
-    needs: [publish]
+    needs: [resolve, publish]
     if: ${{ needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
@@ -721,7 +750,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Setup Node.js
@@ -745,7 +774,7 @@ jobs:
         run: |
           set -euo pipefail
           # Strip leading 'v' from tag
-          version="${{ inputs.version }}"
+          version="${{ needs.resolve.outputs.version }}"
           version="${version#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
@@ -841,6 +870,7 @@ jobs:
 
   build-pypi-wheels:
     name: Build PyPI wheel (${{ matrix.target }})
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -876,7 +906,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - uses: actions/setup-python@v6
@@ -919,6 +949,7 @@ jobs:
 
   build-pypi-sdist:
     name: Build PyPI sdist
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
       - name: Clone from CNB
@@ -927,7 +958,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - uses: actions/setup-python@v6
@@ -992,7 +1023,7 @@ jobs:
 
   update-setup-action:
     name: Update setup-cnb-rs default version
-    needs: [publish]
+    needs: [resolve, publish]
     if: ${{ needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -1012,7 +1043,7 @@ jobs:
       - name: Update default version
         run: |
           set -euo pipefail
-          new_version="${{ inputs.version }}"
+          new_version="${{ needs.resolve.outputs.version }}"
           cd setup-cnb-rs
 
           # Read current default version from action.yml
@@ -1036,7 +1067,7 @@ jobs:
 
   update-package-repos:
     name: Update Homebrew and Scoop package repos
-    needs: [publish]
+    needs: [resolve, publish]
     if: ${{ needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -1047,7 +1078,7 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.version }}" \
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.version }}" \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" .
 
       - name: Setup Python
@@ -1080,7 +1111,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/release/update_package_repos.py \
-            --release-tag "${{ inputs.version }}" \
+            --release-tag "${{ needs.resolve.outputs.version }}" \
             --asset-source cnb \
             --checksums-file "${{ steps.checksums.outputs.file }}" \
             --push
