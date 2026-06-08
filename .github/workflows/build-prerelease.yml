@@ -271,14 +271,19 @@ jobs:
           deb_file=""
           rpm_file=""
 
-          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
-            binary_name="cnb-rs.exe"
-          else
-            binary_name="cnb-rs"
-          fi
-
+          # Copy all workspace binaries into a single archive directory
           mkdir -p "${asset_dir}"
-          cp "target/${{ matrix.target }}/release/${binary_name}" "${asset_dir}/"
+          for bin in cnb-rs cnb-rs-mcp; do
+            if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+              bin_file="${bin}.exe"
+            else
+              bin_file="${bin}"
+            fi
+            bin_path="target/${{ matrix.target }}/release/${bin_file}"
+            if [[ -f "${bin_path}" ]]; then
+              cp "${bin_path}" "${asset_dir}/"
+            fi
+          done
 
           if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
             7z a -tzip -mx=9 "${asset_base}.zip" "${asset_dir}"
@@ -286,28 +291,6 @@ jobs:
           else
             archive_file="${asset_base}.tar.gz"
             tar cf - "${asset_dir}" | gzip -9 > "${archive_file}"
-          fi
-
-          # ── cnb-rs-mcp archive ──
-          mcp_archive_file=""
-          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
-            mcp_binary_name="cnb-rs-mcp.exe"
-          else
-            mcp_binary_name="cnb-rs-mcp"
-          fi
-          mcp_binary_path="target/${{ matrix.target }}/release/${mcp_binary_name}"
-          if [[ -f "${mcp_binary_path}" ]]; then
-            mcp_asset_base="cnb-rs-mcp-${release_tag}-${{ matrix.target }}"
-            mcp_asset_dir="${mcp_asset_base}"
-            mkdir -p "${mcp_asset_dir}"
-            cp "${mcp_binary_path}" "${mcp_asset_dir}/"
-            if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
-              7z a -tzip -mx=9 "${mcp_asset_base}.zip" "${mcp_asset_dir}"
-              mcp_archive_file="${mcp_asset_base}.zip"
-            else
-              mcp_archive_file="${mcp_asset_base}.tar.gz"
-              tar cf - "${mcp_asset_dir}" | gzip -9 > "${mcp_archive_file}"
-            fi
           fi
 
           if [[ "${{ matrix.package_windows_msi }}" == "true" ]]; then
@@ -327,7 +310,7 @@ jobs:
           fi
 
           if [[ "${{ matrix.package_linux_deb }}" == "true" ]]; then
-            cargo deb --no-build --no-strip --target "${{ matrix.target }}"
+            cargo deb -p cnb-rs --no-build --no-strip --target "${{ matrix.target }}"
             generated_deb_file=""
             for candidate_dir in "target/${{ matrix.target }}/debian" "target/debian"; do
               if [[ -d "${candidate_dir}" ]]; then
@@ -346,7 +329,7 @@ jobs:
             if [[ "${release_tag}" == *-* ]]; then
               echo "SKIP: RPM packaging not supported for prerelease version ${release_tag}"
             else
-              cargo generate-rpm --target "${{ matrix.target }}"
+              cargo generate-rpm -p cnb-rs --target "${{ matrix.target }}"
               generated_rpm_file=""
               for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
                 if [[ -d "${candidate_dir}" ]]; then
@@ -361,7 +344,6 @@ jobs:
           fi
 
           printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
-          printf 'mcp_archive_file=%s\n' "${mcp_archive_file}" >> "$GITHUB_OUTPUT"
           printf 'msi_file=%s\n' "${msi_file}" >> "$GITHUB_OUTPUT"
           printf 'deb_file=%s\n' "${deb_file}" >> "$GITHUB_OUTPUT"
           printf 'rpm_file=%s\n' "${rpm_file}" >> "$GITHUB_OUTPUT"
@@ -371,16 +353,6 @@ jobs:
         with:
           name: ${{ steps.package.outputs.archive_file }}
           path: ${{ steps.package.outputs.archive_file }}
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: Upload MCP build archive artifact
-        if: ${{ steps.package.outputs.mcp_archive_file != '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ steps.package.outputs.mcp_archive_file }}
-          path: ${{ steps.package.outputs.mcp_archive_file }}
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
@@ -829,7 +801,7 @@ jobs:
 
             # Locate the release archive for this target
             local archive_file
-            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) ! -name "cnb-rs-mcp-*" | head -n 1)
+            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) | head -n 1)
             if [[ -z "${archive_file}" ]]; then
               echo "WARN: no artifact for ${rust_target}, skipping @cnb-rs/cli-${node_os}-${node_arch}"
               return 0
@@ -911,9 +883,9 @@ jobs:
             local pkg_dir="npm-staging/mcp-${node_os}-${node_arch}"
 
             local archive_file
-            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-mcp-*-${rust_target}.tar.gz" -o -name "cnb-rs-mcp-*-${rust_target}.zip" \) | head -n 1)
+            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) | head -n 1)
             if [[ -z "${archive_file}" ]]; then
-              echo "WARN: no MCP artifact for ${rust_target}, skipping @cnb-rs/mcp-${node_os}-${node_arch}"
+              echo "WARN: no artifact for ${rust_target}, skipping @cnb-rs/mcp-${node_os}-${node_arch}"
               return 0
             fi
 
