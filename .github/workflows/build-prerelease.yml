@@ -197,12 +197,12 @@ jobs:
       - name: Build binaries (Windows MSVC)
         if: endsWith(matrix.target, '-pc-windows-msvc')
         shell: pwsh
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp
 
       - name: Build binaries (cross)
         if: matrix.use_cross
         shell: bash
-        run: cross build --release --locked --target "${{ matrix.target }}"
+        run: cross build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp
 
       - name: Build binaries (native)
         if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross && !matrix.setup_cross_toolchain }}
@@ -214,12 +214,12 @@ jobs:
             CARGO_CMD="cargo +nightly"
             BUILD_STD_FLAG="-Z build-std=std,panic_abort"
           fi
-          $CARGO_CMD build --release --locked --target "${{ matrix.target }}" $BUILD_STD_FLAG
+          $CARGO_CMD build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp $BUILD_STD_FLAG
 
       - name: Build binaries (cross-toolchain)
         if: matrix.setup_cross_toolchain
         shell: bash
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp
 
       - name: Build Windows MSI package
         if: matrix.package_windows_msi
