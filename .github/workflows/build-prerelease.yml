@@ -829,7 +829,7 @@ jobs:
 
             # Locate the release archive for this target
             local archive_file
-            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) | head -n 1)
+            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-*-${rust_target}.tar.gz" -o -name "cnb-rs-*-${rust_target}.zip" \) ! -name "cnb-rs-mcp-*" | head -n 1)
             if [[ -z "${archive_file}" ]]; then
               echo "WARN: no artifact for ${rust_target}, skipping @cnb-rs/cli-${node_os}-${node_arch}"
               return 0
