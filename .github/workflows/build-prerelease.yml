@@ -246,15 +246,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/${{ matrix.target }}/release/cnb-rs"
-          if command -v upx &>/dev/null; then
-            upx --best "${binary}" || echo "UPX compression failed, continuing with uncompressed binary"
-          else
-            # Install UPX
+          if ! command -v upx &>/dev/null; then
             UPX_VERSION="5.1.1"
             curl -sL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" | tar -xJ --strip-components=1 -C /usr/local/bin "upx-${UPX_VERSION}-amd64_linux/upx"
-            upx --best "${binary}" || echo "UPX compression failed, continuing with uncompressed binary"
           fi
+          for bin in cnb-rs cnb-rs-mcp; do
+            binary="target/${{ matrix.target }}/release/${bin}"
+            if [[ -f "${binary}" ]]; then
+              upx --best "${binary}" || echo "UPX compression failed for ${bin}, continuing with uncompressed binary"
+            fi
+          done
 
       - name: Package artifact
         id: package
@@ -285,6 +286,28 @@ jobs:
           else
             archive_file="${asset_base}.tar.gz"
             tar cf - "${asset_dir}" | gzip -9 > "${archive_file}"
+          fi
+
+          # ── cnb-rs-mcp archive ──
+          mcp_archive_file=""
+          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+            mcp_binary_name="cnb-rs-mcp.exe"
+          else
+            mcp_binary_name="cnb-rs-mcp"
+          fi
+          mcp_binary_path="target/${{ matrix.target }}/release/${mcp_binary_name}"
+          if [[ -f "${mcp_binary_path}" ]]; then
+            mcp_asset_base="cnb-rs-mcp-${release_tag}-${{ matrix.target }}"
+            mcp_asset_dir="${mcp_asset_base}"
+            mkdir -p "${mcp_asset_dir}"
+            cp "${mcp_binary_path}" "${mcp_asset_dir}/"
+            if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+              7z a -tzip -mx=9 "${mcp_asset_base}.zip" "${mcp_asset_dir}"
+              mcp_archive_file="${mcp_asset_base}.zip"
+            else
+              mcp_archive_file="${mcp_asset_base}.tar.gz"
+              tar cf - "${mcp_asset_dir}" | gzip -9 > "${mcp_archive_file}"
+            fi
           fi
 
           if [[ "${{ matrix.package_windows_msi }}" == "true" ]]; then
@@ -338,6 +361,7 @@ jobs:
           fi
 
           printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
+          printf 'mcp_archive_file=%s\n' "${mcp_archive_file}" >> "$GITHUB_OUTPUT"
           printf 'msi_file=%s\n' "${msi_file}" >> "$GITHUB_OUTPUT"
           printf 'deb_file=%s\n' "${deb_file}" >> "$GITHUB_OUTPUT"
           printf 'rpm_file=%s\n' "${rpm_file}" >> "$GITHUB_OUTPUT"
@@ -347,6 +371,16 @@ jobs:
         with:
           name: ${{ steps.package.outputs.archive_file }}
           path: ${{ steps.package.outputs.archive_file }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload MCP build archive artifact
+        if: ${{ steps.package.outputs.mcp_archive_file != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.mcp_archive_file }}
+          path: ${{ steps.package.outputs.mcp_archive_file }}
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
@@ -865,6 +899,82 @@ jobs:
           fi
 
           echo "Publishing @cnb-rs/cli@${version} (tag: ${npm_tag})..."
+          npm publish --access public --tag "${npm_tag}"
+
+      - name: Publish MCP platform-specific packages
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          publish_mcp_platform() {
+            local node_os="$1" node_arch="$2" rust_target="$3" binary_name="$4"
+            local pkg_dir="npm-staging/mcp-${node_os}-${node_arch}"
+
+            local archive_file
+            archive_file=$(find release-artifacts -maxdepth 1 -type f \( -name "cnb-rs-mcp-*-${rust_target}.tar.gz" -o -name "cnb-rs-mcp-*-${rust_target}.zip" \) | head -n 1)
+            if [[ -z "${archive_file}" ]]; then
+              echo "WARN: no MCP artifact for ${rust_target}, skipping @cnb-rs/mcp-${node_os}-${node_arch}"
+              return 0
+            fi
+
+            mkdir -p "${pkg_dir}/bin"
+
+            if [[ "${archive_file}" == *.tar.gz ]]; then
+              tar xzf "${archive_file}" --strip-components=1 -C "${pkg_dir}/bin" --wildcards "*/${binary_name}"
+            elif [[ "${archive_file}" == *.zip ]]; then
+              local tmpdir
+              tmpdir=$(mktemp -d)
+              unzip -q "${archive_file}" -d "${tmpdir}"
+              cp "${tmpdir}"/*/"${binary_name}" "${pkg_dir}/bin/"
+              rm -rf "${tmpdir}"
+            fi
+
+            chmod +x "${pkg_dir}/bin/${binary_name}"
+
+            export node_os node_arch version
+            envsubst '$node_os $node_arch $version' < npm/package.json.mcp.tmpl > "${pkg_dir}/package.json"
+            cp npm/README.md "${pkg_dir}/"
+
+            local pkg_full_name="@cnb-rs/mcp-${node_os}-${node_arch}"
+            local npm_tag="${{ steps.version.outputs.npm_tag }}"
+
+            if npm view "${pkg_full_name}@${version}" version &>/dev/null; then
+              echo "SKIP: ${pkg_full_name}@${version} already published"
+              return 0
+            fi
+
+            echo "Publishing ${pkg_full_name}@${version} (tag: ${npm_tag})..."
+            cd "${pkg_dir}"
+            npm publish --access public --tag "${npm_tag}"
+            cd - > /dev/null
+          }
+
+          publish_mcp_platform linux   x64   x86_64-unknown-linux-musl  cnb-rs-mcp
+          publish_mcp_platform linux   arm64 aarch64-unknown-linux-musl cnb-rs-mcp
+          publish_mcp_platform darwin  x64   x86_64-apple-darwin        cnb-rs-mcp
+          publish_mcp_platform darwin  arm64 aarch64-apple-darwin       cnb-rs-mcp
+          publish_mcp_platform win32   x64   x86_64-pc-windows-msvc    cnb-rs-mcp.exe
+          publish_mcp_platform win32   arm64 aarch64-pc-windows-msvc   cnb-rs-mcp.exe
+
+      - name: Publish MCP base package
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          cp npm/README.md npm/cnb-rs-mcp/README.md
+
+          cd npm/cnb-rs-mcp
+
+          sed -i "s/0.0.0-placeholder/${version}/g" package.json
+
+          npm_tag="${{ steps.version.outputs.npm_tag }}"
+
+          if npm view "@cnb-rs/mcp@${version}" version &>/dev/null; then
+            echo "SKIP: @cnb-rs/mcp@${version} already published"
+            exit 0
+          fi
+
+          echo "Publishing @cnb-rs/mcp@${version} (tag: ${npm_tag})..."
           npm publish --access public --tag "${npm_tag}"
 
   build-pypi-wheels:
