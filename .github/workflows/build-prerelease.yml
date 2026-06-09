@@ -999,7 +999,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --locked --out dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
+          args: --release --locked --out ../../dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
           working-directory: pypi/cnb-rs
 
       - name: Build MCP wheel
@@ -1007,17 +1007,17 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --locked --out dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
+          args: --release --locked --out ../../dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
           working-directory: pypi/cnb-rs-mcp
 
       - name: Test wheel
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
         run: |
-          pip install pypi/cnb-rs/dist/cnb_rs-*.whl --force-reinstall
+          pip install dist/cnb_rs-*.whl --force-reinstall
           cnb-rs --help
           python -m cnb_rs --help
-          pip install pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.whl --force-reinstall
+          pip install dist/cnb_rs_mcp-*.whl --force-reinstall
           command -v cnb-rs-mcp
           python -c "from cnb_rs_mcp import find_cnb_rs_mcp_bin; print(find_cnb_rs_mcp_bin())"
 
@@ -1026,9 +1026,9 @@ jobs:
         run: |
           docker run --rm -v ${{ github.workspace }}:/io -w /io alpine:latest sh -c "
             apk add python3 py3-pip;
-            pip install --break-system-packages pypi/cnb-rs/dist/cnb_rs-*.whl --force-reinstall;
+            pip install --break-system-packages dist/cnb_rs-*.whl --force-reinstall;
             cnb-rs --help;
-            pip install --break-system-packages pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.whl --force-reinstall;
+            pip install --break-system-packages dist/cnb_rs_mcp-*.whl --force-reinstall;
             command -v cnb-rs-mcp;
           "
 
@@ -1036,9 +1036,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: pypi-wheel-${{ matrix.target }}
-          path: |
-            pypi/cnb-rs/dist/*.whl
-            pypi/cnb-rs-mcp/dist/*.whl
+          path: dist/*.whl
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
@@ -1071,22 +1069,22 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --out ../../dist
           working-directory: pypi/cnb-rs
 
       - name: Build MCP sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --out ../../dist
           working-directory: pypi/cnb-rs-mcp
 
       - name: Test sdist
         run: |
-          pip install pypi/cnb-rs/dist/cnb_rs-*.tar.gz --force-reinstall
+          pip install dist/cnb_rs-*.tar.gz --force-reinstall
           cnb-rs --help
           python -m cnb_rs --help
-          pip install pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.tar.gz --force-reinstall
+          pip install dist/cnb_rs_mcp-*.tar.gz --force-reinstall
           command -v cnb-rs-mcp
           python -c "from cnb_rs_mcp import find_cnb_rs_mcp_bin; print(find_cnb_rs_mcp_bin())"
 
@@ -1094,9 +1092,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: pypi-sdist
-          path: |
-            pypi/cnb-rs/dist/*.tar.gz
-            pypi/cnb-rs-mcp/dist/*.tar.gz
+          path: dist/*.tar.gz
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
