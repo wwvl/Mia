@@ -1000,30 +1000,45 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --locked --out dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
-          working-directory: pypi
+          working-directory: pypi/cnb-rs
+
+      - name: Build MCP wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist --compatibility pypi ${{ matrix.zig && '--zig' || '' }}
+          working-directory: pypi/cnb-rs-mcp
 
       - name: Test wheel
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
         run: |
-          pip install pypi/dist/cnb_rs-*.whl --force-reinstall
+          pip install pypi/cnb-rs/dist/cnb_rs-*.whl --force-reinstall
           cnb-rs --help
           python -m cnb_rs --help
+          pip install pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.whl --force-reinstall
+          cnb-rs-mcp --help
+          python -m cnb_rs_mcp --help
 
       - name: Test wheel (musl)
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
         run: |
           docker run --rm -v ${{ github.workspace }}:/io -w /io alpine:latest sh -c "
             apk add python3 py3-pip;
-            pip install --break-system-packages pypi/dist/cnb_rs-*.whl --force-reinstall;
+            pip install --break-system-packages pypi/cnb-rs/dist/cnb_rs-*.whl --force-reinstall;
             cnb-rs --help;
+            pip install --break-system-packages pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.whl --force-reinstall;
+            cnb-rs-mcp --help;
           "
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
         with:
           name: pypi-wheel-${{ matrix.target }}
-          path: pypi/dist/*.whl
+          path: |
+            pypi/cnb-rs/dist/*.whl
+            pypi/cnb-rs-mcp/dist/*.whl
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
@@ -1057,19 +1072,31 @@ jobs:
         with:
           command: sdist
           args: --out dist
-          working-directory: pypi
+          working-directory: pypi/cnb-rs
+
+      - name: Build MCP sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: pypi/cnb-rs-mcp
 
       - name: Test sdist
         run: |
-          pip install pypi/dist/cnb_rs-*.tar.gz --force-reinstall
+          pip install pypi/cnb-rs/dist/cnb_rs-*.tar.gz --force-reinstall
           cnb-rs --help
           python -m cnb_rs --help
+          pip install pypi/cnb-rs-mcp/dist/cnb_rs_mcp-*.tar.gz --force-reinstall
+          cnb-rs-mcp --help
+          python -m cnb_rs_mcp --help
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v6
         with:
           name: pypi-sdist
-          path: pypi/dist/*.tar.gz
+          path: |
+            pypi/cnb-rs/dist/*.tar.gz
+            pypi/cnb-rs-mcp/dist/*.tar.gz
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
