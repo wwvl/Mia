@@ -228,6 +228,7 @@ jobs:
           .\packaging\windows\scripts\build-msi.ps1 `
             -Target ${{ matrix.target }} `
             -Architecture ${{ matrix.windows_msi_arch }} `
+            -AssetVersion "${{ needs.resolve.outputs.version }}" `
             -OutputDir target\windows-msi
 
       - name: Build Linux packaging helper binary
@@ -306,7 +307,7 @@ jobs:
             if [[ "${{ matrix.target }}" != "${host_target}" ]]; then
               completion_binary_path="target/packaging-host/${host_target}/release/cnb-rs"
             fi
-            bash packaging/linux/scripts/generate-completions.sh --binary-path "${completion_binary_path}"
+            bash scripts/packaging/linux/scripts/generate-completions.sh --binary-path "${completion_binary_path}"
           fi
 
           if [[ "${{ matrix.package_linux_deb }}" == "true" ]]; then
@@ -324,23 +325,20 @@ jobs:
           fi
 
           if [[ "${{ matrix.package_linux_rpm }}" == "true" ]]; then
-            # RPM version format does not support '-' (e.g., 1.0.0-alpha.11 is invalid)
-            # Skip RPM packaging for prerelease versions
-            if [[ "${release_tag}" == *-* ]]; then
-              echo "SKIP: RPM packaging not supported for prerelease version ${release_tag}"
-            else
-              cargo generate-rpm -p cnb-rs --target "${{ matrix.target }}"
-              generated_rpm_file=""
-              for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
-                if [[ -d "${candidate_dir}" ]]; then
-                  generated_rpm_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.rpm' | head -n 1)"
-                fi
-                if [[ -n "${generated_rpm_file}" ]]; then break; fi
-              done
-              : "${generated_rpm_file:?failed to locate generated rpm file}"
-              cp "${generated_rpm_file}" .
-              rpm_file="$(basename "${generated_rpm_file}")"
-            fi
+            # RPM Version field does not support '-'; convert to tilde for prerelease sorting
+            # e.g., 1.0.0-beta.10 → 1.0.0~beta.10 (sorts lower than 1.0.0 in RPM)
+            rpm_version="${release_tag//-/\~}"
+            cargo generate-rpm -p cnb-rs --target "${{ matrix.target }}" -s "version = \"${rpm_version}\""
+            generated_rpm_file=""
+            for candidate_dir in "target/${{ matrix.target }}/generate-rpm" "target/generate-rpm"; do
+              if [[ -d "${candidate_dir}" ]]; then
+                generated_rpm_file="$(find "${candidate_dir}" -maxdepth 1 -type f -name '*.rpm' | head -n 1)"
+              fi
+              if [[ -n "${generated_rpm_file}" ]]; then break; fi
+            done
+            : "${generated_rpm_file:?failed to locate generated rpm file}"
+            cp "${generated_rpm_file}" .
+            rpm_file="$(basename "${generated_rpm_file}")"
           fi
 
           printf 'archive_file=%s\n' "${archive_file}" >> "$GITHUB_OUTPUT"
@@ -549,6 +547,26 @@ jobs:
             -CertificatePath "${{ steps.certificate.outputs.certificate_path }}" `
             -Version "${{ steps.metadata.outputs.release_version }}"
 
+      - name: Upload MSIX x64 artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: cnb-rs-v${{ steps.metadata.outputs.release_version }}-x86_64-pc-windows-msvc.msix
+          path: target/windows-msix/output/cnb-rs-v${{ steps.metadata.outputs.release_version }}-x86_64-pc-windows-msvc.msix
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload MSIX arm64 artifact
+        if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: cnb-rs-v${{ steps.metadata.outputs.release_version }}-aarch64-pc-windows-msvc.msix
+          path: target/windows-msix/output/cnb-rs-v${{ steps.metadata.outputs.release_version }}-aarch64-pc-windows-msvc.msix
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
       - name: Upload MSIX bundle artifact
         if: ${{ steps.signing_mode.outputs.enabled == 'true' }}
         uses: actions/upload-artifact@v6
@@ -637,7 +655,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: cnb-rs-*
+          pattern: cnb-rs*
           path: release-artifacts
           merge-multiple: true
 
@@ -1240,3 +1258,73 @@ jobs:
           set -euo pipefail
           echo "Triggering plugin image build for ${{ needs.resolve.outputs.version }}..."
           cnb-rs build start --repo wwvo/cnb-rs/cnb-rs -b main -e api_trigger_build-plugin-image --title "构建插件镜像 (${{ needs.resolve.outputs.version }})"
+
+  update-readme:
+    name: Update README help output
+    needs: [resolve, build]
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Clone from CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" repo
+          cd repo
+          git config user.name "cnb-rs-bot"
+          git config user.email "noreply@cnb.cool"
+
+      - name: Download binary
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cnb-rs-*-x86_64-unknown-linux-musl*
+          path: repo/artifacts
+          merge-multiple: true
+
+      - name: Update help output in README
+        working-directory: repo
+        run: |
+          set -euo pipefail
+
+          # Extract binary from release archive
+          archive=$(find artifacts -name "cnb-rs-*-x86_64-unknown-linux-musl.tar.gz" | head -1)
+          if [[ -z "${archive}" ]]; then
+            echo "No linux-musl archive found, skipping README update"
+            exit 0
+          fi
+          mkdir -p /tmp/cnb-bin
+          tar xzf "${archive}" --strip-components=1 -C /tmp/cnb-bin
+          chmod +x /tmp/cnb-bin/cnb-rs
+
+          # Generate help output
+          help_output=$(/tmp/cnb-bin/cnb-rs --help)
+
+          # Replace content between markers in all README files
+          for readme in README.md docker/README.md docker/README.zh-cn.md; do
+            if [[ -f "${readme}" ]] && grep -q "BEGIN_HELP" "${readme}"; then
+              awk -v help="${help_output}" '
+                /<!-- BEGIN_HELP -->/ { print; print "```"; print help; print "```"; skip=1; next }
+                /<!-- END_HELP -->/ { skip=0 }
+                !skip { print }
+              ' "${readme}" > "${readme}.tmp"
+              mv "${readme}.tmp" "${readme}"
+            fi
+          done
+
+      - name: Commit and push if changed
+        working-directory: repo
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet README.md docker/README.md docker/README.zh-cn.md; then
+            echo "README help output is already up to date"
+            exit 0
+          fi
+          git add README.md docker/README.md docker/README.zh-cn.md
+          git commit -m "📝 docs(readme): 自动同步 cnb-rs --help 输出 [skip ci]"
+          git push
