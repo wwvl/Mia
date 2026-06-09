@@ -1018,8 +1018,9 @@ jobs:
           cnb-rs --help
           python -m cnb_rs --help
           pip install dist/cnb_rs_mcp-*.whl --force-reinstall
-          command -v cnb-rs-mcp
-          python -c "from cnb_rs_mcp import find_cnb_rs_mcp_bin; print(find_cnb_rs_mcp_bin())"
+          cnb-rs-mcp --help
+          cnb-rs-mcp --version
+          python -m cnb_rs_mcp --help
 
       - name: Test wheel (musl)
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
@@ -1029,7 +1030,7 @@ jobs:
             pip install --break-system-packages dist/cnb_rs-*.whl --force-reinstall;
             cnb-rs --help;
             pip install --break-system-packages dist/cnb_rs_mcp-*.whl --force-reinstall;
-            command -v cnb-rs-mcp;
+            cnb-rs-mcp --help;
           "
 
       - name: Upload wheel artifact
@@ -1085,8 +1086,9 @@ jobs:
           cnb-rs --help
           python -m cnb_rs --help
           pip install dist/cnb_rs_mcp-*.tar.gz --force-reinstall
-          command -v cnb-rs-mcp
-          python -c "from cnb_rs_mcp import find_cnb_rs_mcp_bin; print(find_cnb_rs_mcp_bin())"
+          cnb-rs-mcp --help
+          cnb-rs-mcp --version
+          python -m cnb_rs_mcp --help
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v6
