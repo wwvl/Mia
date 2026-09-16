@@ -1,4 +1,4 @@
-name: Prerelease Assets
+name: Release Assets
 
 on:
   workflow_dispatch:
@@ -33,7 +33,9 @@ jobs:
           if [[ -n "${{ inputs.version }}" ]]; then
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            latest=$(git ls-remote --tags --sort=-version:refname \
+            # versionsort.suffix=-：让 v1.0.0-rc.2 这类预发布 tag 排在 v1.0.0 之前，
+            # 否则 git 默认把带后缀的 tag 视为更新版本，正式版发布后留空会错选回 rc。
+            latest=$(git -c versionsort.suffix=- ls-remote --tags --sort=-version:refname \
               "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" "v*" \
               | grep -v '\^{}' | head -1 | sed 's|.*/||')
             if [[ -z "${latest}" ]]; then
@@ -732,11 +734,18 @@ jobs:
             echo "release ${release_tag} 已存在，跳过 create"
           else
             echo "release ${release_tag} 不存在，尝试创建"
+            # 版本号含 '-'（alpha / beta / rc）→ 预发布；否则正式版并标记为 latest。
+            # cnb-rs release edit 只能把 release 改成预发布、改不回来，所以必须在 create 时定对。
+            if [[ "${release_tag}" == *-* ]]; then
+              release_flags=(-p)
+            else
+              release_flags=(--make-latest)
+            fi
             cnb-rs --repo "${repo}" release create \
               -t "${release_tag}" \
               -n "${release_tag}" \
               -F LATEST_CHANGELOG.md \
-              -p \
+              "${release_flags[@]}" \
               || echo "(create 报错，继续二次 view 验证)"
 
             if cnb-rs --repo "${repo}" release view "${release_tag}" >/dev/null 2>&1; then
