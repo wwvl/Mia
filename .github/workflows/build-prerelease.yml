@@ -769,6 +769,16 @@ jobs:
 
           echo "CNB Release upload complete"
 
+      # 给本次解决的 issue 留「已随 vX 发布」评论（commit footer Closes/Fixes/Resolves #n），
+      # 替代按版本号命名的 released:* 标签；脚本幂等，rerun 不会重复评论。评论失败不影响发布本身。
+      - name: Comment on resolved issues
+        continue-on-error: true
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.version }}
+          REPO: ${{ env.CNB_REPO_SLUG }}
+        run: bash scripts/release/comment-resolved-issues.sh
+
   publish-npm:
     name: Publish npm packages
     needs: [resolve, publish]
