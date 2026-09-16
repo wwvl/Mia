@@ -1197,7 +1197,7 @@ jobs:
 
           git add -A
           git diff --cached --quiet && { echo "No changes"; exit 0; }
-          git commit -m "🔧 chore: bump default version to ${new_version}"
+          git commit -m "chore(release): bump default version to ${new_version}"
           git push
 
   update-package-repos:
@@ -1337,5 +1337,5 @@ jobs:
             exit 0
           fi
           git add README.md docker/README.md docker/README.zh-cn.md
-          git commit -m "📝 docs(readme): 自动同步 cnb-rs --help 输出 [skip ci]"
+          git commit -m "docs(readme): 自动同步 cnb-rs --help 输出 [skip ci]"
           git push
