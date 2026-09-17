@@ -46,6 +46,30 @@ jobs:
           fi
           echo "Resolved version: $(cat "$GITHUB_OUTPUT" | grep version | cut -d= -f2)"
 
+      - name: Verify tag matches Cargo.toml
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          git init --quiet tag-check
+          git -C tag-check remote add origin "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git"
+          git -C tag-check fetch --quiet --depth=1 origin "refs/tags/${VERSION}"
+          workspace_version="$(
+            git -C tag-check show FETCH_HEAD:Cargo.toml |
+              sed -n '/^\[workspace\.package\][[:space:]]*$/,/^\[/ {
+                s/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p
+              }'
+          )"
+          tag_version="${VERSION#v}"
+          if [[ -z "${workspace_version}" || "${tag_version}" != "${workspace_version}" ]]; then
+            echo "ERROR: release tag and Cargo.toml version do not match" >&2
+            echo "Tag version: ${tag_version}" >&2
+            echo "Cargo.toml workspace version: ${workspace_version:-<unreadable>}" >&2
+            exit 1
+          fi
+          echo "Version verified: ${VERSION} -> ${workspace_version}"
+
   build:
     name: Build ${{ matrix.target }}
     needs: resolve
