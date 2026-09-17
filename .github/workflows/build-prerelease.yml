@@ -1027,12 +1027,20 @@ jobs:
             @cnb-rs/cli-linux-x64 @cnb-rs/cli-linux-arm64 @cnb-rs/cli-darwin-x64 @cnb-rs/cli-darwin-arm64 @cnb-rs/cli-win32-x64 @cnb-rs/cli-win32-arm64
             @cnb-rs/mcp-linux-x64 @cnb-rs/mcp-linux-arm64 @cnb-rs/mcp-darwin-x64 @cnb-rs/mcp-darwin-arm64 @cnb-rs/mcp-win32-x64 @cnb-rs/mcp-win32-arm64
           )
+          # 刚 publish 的版本在 registry 上有传播延迟（首个正式版实测大半包在几秒内还查不到），
+          # 不用 npm view 预判，直接重试 dist-tag add，最多等 ~3 分钟。
           for pkg in "${packages[@]}"; do
-            if npm view "${pkg}@${VERSION}" version >/dev/null 2>&1; then
-              npm dist-tag add "${pkg}@${VERSION}" next || echo "FAIL: ${pkg} dist-tag add 失败，继续处理其余包"
-            else
-              echo "SKIP: ${pkg}@${VERSION} 未发布"
-            fi
+            for attempt in 1 2 3 4 5 6 7 8 9; do
+              if npm dist-tag add "${pkg}@${VERSION}" next >/dev/null 2>&1; then
+                echo "+next: ${pkg}@${VERSION}"
+                break
+              fi
+              if [[ "${attempt}" -eq 9 ]]; then
+                echo "FAIL: ${pkg}@${VERSION} dist-tag add 多次失败（版本未发布或未传播），继续处理其余包"
+              else
+                sleep 20
+              fi
+            done
           done
 
   build-pypi-wheels:
