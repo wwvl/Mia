@@ -1012,6 +1012,29 @@ jobs:
           echo "Publishing @cnb-rs/mcp@${version} (tag: ${npm_tag})..."
           npm publish --access public --tag "${npm_tag}"
 
+      # 正式版发布后把 `next` 对齐到同一版本，避免 `@next` 指向比 `latest` 更旧的 rc。
+      # dist-tag 操作不在 OIDC trusted publishing 覆盖范围内，需要 NPM_TOKEN；失败不阻断发布。
+      - name: Align next dist-tag with latest
+        if: ${{ steps.version.outputs.npm_tag == 'latest' }}
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          packages=(
+            @cnb-rs/cli @cnb-rs/mcp
+            @cnb-rs/cli-linux-x64 @cnb-rs/cli-linux-arm64 @cnb-rs/cli-darwin-x64 @cnb-rs/cli-darwin-arm64 @cnb-rs/cli-win32-x64 @cnb-rs/cli-win32-arm64
+            @cnb-rs/mcp-linux-x64 @cnb-rs/mcp-linux-arm64 @cnb-rs/mcp-darwin-x64 @cnb-rs/mcp-darwin-arm64 @cnb-rs/mcp-win32-x64 @cnb-rs/mcp-win32-arm64
+          )
+          for pkg in "${packages[@]}"; do
+            if npm view "${pkg}@${VERSION}" version >/dev/null 2>&1; then
+              npm dist-tag add "${pkg}@${VERSION}" next || echo "FAIL: ${pkg} dist-tag add 失败，继续处理其余包"
+            else
+              echo "SKIP: ${pkg}@${VERSION} 未发布"
+            fi
+          done
+
   build-pypi-wheels:
     name: Build PyPI wheel (${{ matrix.target }})
     needs: resolve
