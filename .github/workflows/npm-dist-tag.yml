@@ -1,0 +1,80 @@
+# 手动维护 npm dist-tag（运行副本在 wwvl/Mia，本文件是源）。
+#
+# 用途：正式版发布后把 `next` 对齐到 `latest`（build-prerelease.yml 的 publish-npm job 会自动做，
+# 这里用于补救 / 历史修正），或删除过时的占位 tag（如 `init`）。
+# 需要 secrets.NPM_TOKEN（OIDC trusted publishing 只覆盖 npm publish，不覆盖 dist-tag 操作）。
+name: npm dist-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要打 tag 的版本（如 1.1.0，不带 v）；留空则只执行 remove_tag"
+        required: false
+        type: string
+      tag:
+        description: "要添加的 dist-tag 名"
+        required: false
+        default: next
+        type: string
+      remove_tag:
+        description: "要从全部包上删除的 dist-tag 名（如 init）；留空不删"
+        required: false
+        type: string
+
+env:
+  PACKAGES: >-
+    @cnb-rs/cli @cnb-rs/mcp
+    @cnb-rs/cli-linux-x64 @cnb-rs/cli-linux-arm64 @cnb-rs/cli-darwin-x64 @cnb-rs/cli-darwin-arm64 @cnb-rs/cli-win32-x64 @cnb-rs/cli-win32-arm64
+    @cnb-rs/mcp-linux-x64 @cnb-rs/mcp-linux-arm64 @cnb-rs/mcp-darwin-x64 @cnb-rs/mcp-darwin-arm64 @cnb-rs/mcp-win32-x64 @cnb-rs/mcp-win32-arm64
+
+jobs:
+  dist-tag:
+    name: Update npm dist-tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Add dist-tag
+        if: ${{ inputs.version != '' && inputs.tag != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          for pkg in ${PACKAGES}; do
+            if ! npm view "${pkg}@${VERSION}" version >/dev/null 2>&1; then
+              echo "SKIP: ${pkg}@${VERSION} 不存在"
+              continue
+            fi
+            echo "dist-tag add ${pkg}@${VERSION} ${TAG}"
+            npm dist-tag add "${pkg}@${VERSION}" "${TAG}"
+          done
+
+      - name: Remove dist-tag
+        if: ${{ inputs.remove_tag != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REMOVE_TAG: ${{ inputs.remove_tag }}
+        run: |
+          set -euo pipefail
+          for pkg in ${PACKAGES}; do
+            if npm dist-tag ls "${pkg}" 2>/dev/null | grep -q "^${REMOVE_TAG}:"; then
+              echo "dist-tag rm ${pkg} ${REMOVE_TAG}"
+              npm dist-tag rm "${pkg}" "${REMOVE_TAG}"
+            else
+              echo "SKIP: ${pkg} 没有 dist-tag ${REMOVE_TAG}"
+            fi
+          done
+
+      - name: Show result
+        run: |
+          for pkg in ${PACKAGES}; do
+            echo "== ${pkg}"
+            npm dist-tag ls "${pkg}" || true
+          done
