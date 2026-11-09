@@ -89,18 +89,18 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive_ext: tar.gz
-            use_cross: true
+            setup_cross_toolchain: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-            use_cross: true
+            setup_cross_toolchain: true
             package_linux_deb: true
             package_linux_rpm: true
             linux_deb_arch: arm64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             archive_ext: tar.gz
-            use_cross: true
+            setup_cross_toolchain: true
           - os: windows-latest
             target: x86_64-pc-windows-gnu
             archive_ext: zip
@@ -160,12 +160,6 @@ jobs:
           host_target="$(rustc -vV | sed -n 's/^host: //p')"
           echo "target=${host_target}" >> "$GITHUB_OUTPUT"
 
-      - name: Install cross
-        if: matrix.use_cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
       - name: Setup MinGW
         if: matrix.setup_mingw
         uses: msys2/setup-msys2@v2
@@ -219,7 +213,7 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Install system dependencies (Linux native)
-        if: runner.os == 'Linux' && !matrix.use_cross && !matrix.setup_cross_toolchain
+        if: runner.os == 'Linux' && !matrix.setup_cross_toolchain
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Build binaries (Windows MSVC)
@@ -227,13 +221,8 @@ jobs:
         shell: pwsh
         run: cargo build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp
 
-      - name: Build binaries (cross)
-        if: matrix.use_cross
-        shell: bash
-        run: cross build --release --locked --target "${{ matrix.target }}" -p cnb-rs -p cnb-mcp
-
       - name: Build binaries (native)
-        if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.use_cross && !matrix.setup_cross_toolchain }}
+        if: ${{ !endsWith(matrix.target, '-pc-windows-msvc') && !matrix.setup_cross_toolchain }}
         shell: bash
         run: |
           CARGO_CMD="cargo"
@@ -1012,37 +1001,6 @@ jobs:
           echo "Publishing @cnb-rs/mcp@${version} (tag: ${npm_tag})..."
           npm publish --access public --tag "${npm_tag}"
 
-      # 正式版发布后把 `next` 对齐到同一版本，避免 `@next` 指向比 `latest` 更旧的 rc。
-      # dist-tag 操作不在 OIDC trusted publishing 覆盖范围内，需要 NPM_TOKEN；失败不阻断发布。
-      - name: Align next dist-tag with latest
-        if: ${{ steps.version.outputs.npm_tag == 'latest' }}
-        continue-on-error: true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          packages=(
-            @cnb-rs/cli @cnb-rs/mcp
-            @cnb-rs/cli-linux-x64 @cnb-rs/cli-linux-arm64 @cnb-rs/cli-darwin-x64 @cnb-rs/cli-darwin-arm64 @cnb-rs/cli-win32-x64 @cnb-rs/cli-win32-arm64
-            @cnb-rs/mcp-linux-x64 @cnb-rs/mcp-linux-arm64 @cnb-rs/mcp-darwin-x64 @cnb-rs/mcp-darwin-arm64 @cnb-rs/mcp-win32-x64 @cnb-rs/mcp-win32-arm64
-          )
-          # 刚 publish 的版本在 registry 上有传播延迟（首个正式版实测大半包在几秒内还查不到），
-          # 不用 npm view 预判，直接重试 dist-tag add，最多等 ~3 分钟。
-          for pkg in "${packages[@]}"; do
-            for attempt in 1 2 3 4 5 6 7 8 9; do
-              if npm dist-tag add "${pkg}@${VERSION}" next >/dev/null 2>&1; then
-                echo "+next: ${pkg}@${VERSION}"
-                break
-              fi
-              if [[ "${attempt}" -eq 9 ]]; then
-                echo "FAIL: ${pkg}@${VERSION} dist-tag add 多次失败（版本未发布或未传播），继续处理其余包"
-              else
-                sleep 20
-              fi
-            done
-          done
-
   build-pypi-wheels:
     name: Build PyPI wheel (${{ matrix.target }})
     needs: resolve
@@ -1348,7 +1306,9 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 \
+          # 浅克隆只抓远端 HEAD 分支，显式 --branch main 固定分支，不依赖远端 HEAD 指向；
+          # 切 release/<tag> 分支是从 main 分出来，不需要完整历史。
+          git clone --depth 1 --branch main \
             "https://oauth2:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git" repo
           cd repo
           git config user.name "${CNB_GIT_USER_NAME}"
@@ -1361,46 +1321,33 @@ jobs:
           path: repo/artifacts
           merge-multiple: true
 
-      - name: Update help output in README
+      - name: Extract binary
+        id: extract
         working-directory: repo
         run: |
           set -euo pipefail
-
-          # Extract binary from release archive
           archive=$(find artifacts -name "cnb-rs-*-x86_64-unknown-linux-musl.tar.gz" | head -1)
           if [[ -z "${archive}" ]]; then
             echo "No linux-musl archive found, skipping README update"
+            echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           mkdir -p /tmp/cnb-bin
           tar xzf "${archive}" --strip-components=1 -C /tmp/cnb-bin
           chmod +x /tmp/cnb-bin/cnb-rs
+          echo "found=true" >> "$GITHUB_OUTPUT"
 
-          # Generate help output
-          help_output=$(/tmp/cnb-bin/cnb-rs --help)
+      - name: Setup cnb-rs
+        if: ${{ steps.extract.outputs.found == 'true' }}
+        uses: wwvl/setup-cnb-rs@main
 
-          # Replace content between markers in all README files
-          for readme in README.md docker/README.md docker/README.zh-cn.md; do
-            if [[ -f "${readme}" ]] && grep -q "BEGIN_HELP" "${readme}"; then
-              awk -v help="${help_output}" '
-                /<!-- BEGIN_HELP -->/ { print; print "```"; print help; print "```"; skip=1; next }
-                /<!-- END_HELP -->/ { skip=0 }
-                !skip { print }
-              ' "${readme}" > "${readme}.tmp"
-              mv "${readme}.tmp" "${readme}"
-            fi
-          done
-
-      - name: Commit and push if changed
+      # main 是保护分支，直推会被 hook 拒绝；改为切 release/<tag> 分支提交并开 PR 等人工合入。
+      - name: Sync README help output via PR
+        if: ${{ steps.extract.outputs.found == 'true' }}
         working-directory: repo
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if git diff --quiet README.md docker/README.md docker/README.zh-cn.md; then
-            echo "README help output is already up to date"
-            exit 0
-          fi
-          git add README.md docker/README.md docker/README.zh-cn.md
-          git commit -m "docs(readme): 自动同步 cnb-rs --help 输出 [skip ci]"
-          git push
+          RELEASE_TAG: ${{ needs.resolve.outputs.version }}
+          README_BIN: /tmp/cnb-bin/cnb-rs
+          REPO: ${{ env.CNB_REPO_SLUG }}
+        run: bash scripts/release/open-readme-pr.sh
