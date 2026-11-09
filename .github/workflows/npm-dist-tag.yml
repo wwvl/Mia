@@ -1,7 +1,8 @@
 # 手动维护 npm dist-tag（运行副本在 wwvl/Mia，本文件是源）。
 #
-# 用途：正式版发布后把 `next` 对齐到 `latest`（build-prerelease.yml 的 publish-npm job 会自动做，
-# 这里用于补救 / 历史修正），或删除过时的占位 tag（如 `init`）。
+# 用途：正式版发布后把 `next` 对齐到 `latest`，或删除过时的占位 tag（如 `init`）。
+# build-prerelease.yml 的 publish-npm job 不再自动做对齐（NPM_TOKEN 个人令牌失效会导致
+# 发版流水线反复失败重试），需要时在这里手动触发。
 # 需要 secrets.NPM_TOKEN（OIDC trusted publishing 只覆盖 npm publish，不覆盖 dist-tag 操作）。
 name: npm dist-tag
 
