@@ -119,11 +119,6 @@ jobs:
             msvc_dev_cmd_arch: amd64_arm64
             package_windows_msi: true
             windows_msi_arch: arm64
-          - os: ubuntu-latest
-            target: aarch64-pc-windows-gnullvm
-            archive_ext: zip
-            setup_cross_toolchain: true
-            experimental: true
           - os: macos-latest
             target: x86_64-apple-darwin
             archive_ext: tar.gz
@@ -173,7 +168,7 @@ jobs:
         shell: pwsh
         run: echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
 
-      - name: Setup Windows ARM64 gnullvm toolchain
+      - name: Setup cross toolchain
         if: matrix.setup_cross_toolchain
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:
@@ -211,10 +206,6 @@ jobs:
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
-
-      - name: Install system dependencies (Linux native)
-        if: runner.os == 'Linux' && !matrix.setup_cross_toolchain
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Build binaries (Windows MSVC)
         if: endsWith(matrix.target, '-pc-windows-msvc')
@@ -768,7 +759,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             manylinux: '2_17'
             zig: true
-          # Linux Musl (x86_64 only; aarch64-musl requires libdbus cross-build not available in musllinux container)
+          # Linux Musl (x86_64 only; an aarch64 musl wheel is not provided for now, see #585)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             manylinux: musllinux_1_2
@@ -865,9 +856,6 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
